@@ -19,11 +19,11 @@ EPSILON_END = 0.1
 EPSILON_DECAY = 5e4
 TARGET_UPDATE_FREQ = 2500  # 10_000
 LR = 2.5e-4
-SAVE_PATH = "./train_params/state_train_150223_v3.pt"
+SAVE_PATH = "./train_params/state_train_rainbow.pt"
 SAVE_INTERVAL = 5000  # 30_000
 LOG_DIR = "./logs/atari_vanilla"
 LOG_INTERVAL = 1000  # 10_000
-LOAD_MODEL_PARAMS = True
+LOAD_MODEL_PARAMS = False
 LOAD_PATH = "./train_params/state_train_150223_v2.pt"
 
 
