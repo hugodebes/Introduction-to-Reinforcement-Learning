@@ -6,6 +6,7 @@ from collections import deque
 from torch.utils.tensorboard import SummaryWriter
 from model import Network
 from utils import make_env, make_replay_buffer, save_state, load_state
+from per import PrioritizedReplayBuffer
 from itertools import count
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,16 +26,29 @@ LOG_DIR = "./logs/atari_vanilla"
 LOG_INTERVAL = 1000  # 10_000
 LOAD_MODEL_PARAMS = False
 LOAD_PATH = "./train_params/state_train_150223_v2.pt"
+PER_BETA = 0.2
+PER_BUFFER_CAPACITY = 2**14
+PER_ALPHA = 0.6
 
 
-def train():
+def train(fg_per=True):
     """
     Function to train the agent to play in the environment
+
+    Arguments
+    ---------
+        fg_per: bool
+            Prioritized Experience Replay Buffer
     """
     summary_writer = SummaryWriter(LOG_DIR)
 
     env = make_env(ENV_ID)
-    replay_buffer = make_replay_buffer(env, MIN_REPLAY_SIZE, BUFFER_SIZE)
+    if fg_per:
+        per_buffer = PrioritizedReplayBuffer(
+            capacity=PER_BUFFER_CAPACITY, alpha=PER_ALPHA
+        )
+    else:
+        replay_buffer = make_replay_buffer(env, MIN_REPLAY_SIZE, BUFFER_SIZE)
 
     online_net = Network(env, gamma=GAMMA, device=device).to(device)
     target_net = Network(env, gamma=GAMMA, device=device).to(device)
@@ -62,7 +76,17 @@ def train():
 
     for step in count():
 
-        epsilon = np.interp(step, [0, EPSILON_DECAY], [EPSILON_START, EPSILON_END])
+        if fg_per:
+            if per_buffer.binary_full():
+                epsilon = np.interp(
+                    step - PER_BUFFER_CAPACITY,
+                    [0, EPSILON_DECAY],
+                    [EPSILON_START, EPSILON_END],
+                )
+            else:
+                epsilon = EPSILON_START
+        else:
+            epsilon = np.interp(step, [0, EPSILON_DECAY], [EPSILON_START, EPSILON_END])
 
         action = online_net.act(obs, epsilon, fg_watch)
 
@@ -78,8 +102,11 @@ def train():
             beginning_round = True
             lives = info["lives"]
 
-        transition = (obs, action, rew, done, new_obs)
-        replay_buffer.append(transition)
+        if fg_per:
+            per_buffer.add(obs, action, rew, done, new_obs)
+        else:
+            transition = (obs, action, rew, done, new_obs)
+            replay_buffer.append(transition)
 
         # End of an Episode
         if done:
@@ -91,39 +118,59 @@ def train():
 
         obs = new_obs
 
-        # Start Gradient Descent
-        transitions = random.sample(replay_buffer, BATCH_SIZE)
-        loss = online_net.compute_loss(transitions, target_net)
+        if per_buffer.binary_full():
+            # Start Gradient Descent
+            if fg_per:
+                # Select the samples
+                transitions = per_buffer.sample(BATCH_SIZE, PER_BETA)
+                # Compute the loss and the Magnitude of the error
+                td_errors, loss = online_net.compute_loss(
+                    transitions, target_net, torch.Tensor(transitions["weights"])
+                )
+                # Update replay buffer priorities
+                new_priorities = np.abs(td_errors.cpu().numpy()) + 1e-6
+                per_buffer.update_priorities(transitions["indexes"], new_priorities)
+            else:
+                # Select the samples
+                transitions = random.sample(replay_buffer, BATCH_SIZE)
+                # Compute the loss
+                _, loss = online_net.compute_loss(transitions, target_net)
 
-        # Gradient Descent
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            # Gradient Descent
+            optimizer.zero_grad()
+            # Backward Propagation
+            loss.backward()
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(online_net.parameters(), max_norm=0.5)
+            # Update the model weights
+            optimizer.step()
 
-        # Update Target Network
-        if step % TARGET_UPDATE_FREQ == 0:
-            target_net.load_state_dict(online_net.state_dict())
+            # Update Target Network
+            if step % TARGET_UPDATE_FREQ == 0:
+                target_net.load_state_dict(online_net.state_dict())
 
-        # Logging
-        if step % LOG_INTERVAL == 0:
-            rew_mean = np.mean([e["r"] for e in epinfos_buffer]) or 0
-            len_mean = np.mean([e["l"] for e in epinfos_buffer]) or 0
-            print()
-            print("Step", step)
-            print("Avg Rew", rew_mean)
-            print("Len Ep", len_mean)
-            print("Episodes", episode_count)
-            print("epsilon", epsilon)
+            # Logging
+            if step % LOG_INTERVAL == 0:
+                rew_mean = np.mean([e["r"] for e in epinfos_buffer]) or 0
+                len_mean = np.mean([e["l"] for e in epinfos_buffer]) or 0
+                print()
+                print("Step", step)
+                print("Avg Rew", rew_mean)
+                print("Len Ep", len_mean)
+                print("Episodes", episode_count)
+                print("epsilon", epsilon)
 
-            # Tensorboard
-            summary_writer.add_scalar("Avg Rew", rew_mean, global_step=step)
-            summary_writer.add_scalar("Len Episodes", len_mean, global_step=step)
-            summary_writer.add_scalar("Episodes", episode_count, global_step=step)
+                # Tensorboard
+                summary_writer.add_scalar("Avg Rew", rew_mean, global_step=step)
+                summary_writer.add_scalar("Len Episodes", len_mean, global_step=step)
+                summary_writer.add_scalar("Episodes", episode_count, global_step=step)
 
-        # Save
-        if step % SAVE_INTERVAL == 0 and step != 0:
-            print("Saving")
-            save_state(SAVE_PATH, online_net, episode_count, optimizer, epinfos_buffer)
+            # Save
+            if step % SAVE_INTERVAL == 0 and step != 0:
+                print("Saving")
+                save_state(
+                    SAVE_PATH, online_net, episode_count, optimizer, epinfos_buffer
+                )
 
 
 if __name__ == "__main__":

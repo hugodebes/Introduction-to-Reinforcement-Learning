@@ -4,7 +4,7 @@ import numpy as np
 
 class PrioritizedReplayBuffer:
     # Prioritzed Replay Buffer Implementation (Intelligent sampling on the memory)
-    def __init__(self, capacity, alpha):
+    def __init__(self, capacity=2**14, alpha=0.6):
         """
         Create the Buffer
 
@@ -16,6 +16,7 @@ class PrioritizedReplayBuffer:
                 HyperParameter to choose how much prioritization is used
         """
         assert capacity % 2 == 0
+        assert alpha >= 0
 
         self.capacity = capacity
         self.alpha = alpha
@@ -26,10 +27,10 @@ class PrioritizedReplayBuffer:
 
         self.data = {
             "obs": np.zeros(shape=(self.capacity, 4, 84, 84), dtype=np.uint8),
-            "action": np.zeros(shape=self.capacity, dtype=np.uint32),
-            "reward": np.zeros(shape=capacity, dtype=np.uint32),
+            "action": np.zeros(shape=self.capacity, dtype=np.int32),
+            "reward": np.zeros(shape=capacity, dtype=np.int32),
             "next_obs": np.zeros(shape=(self.capacity, 4, 84, 84), dtype=np.uint8),
-            "done": np.zeros(shape=self.capacity, dtype=np.bool),
+            "done": np.zeros(shape=self.capacity, dtype=bool),
         }
 
         self.next_idx = 0
@@ -69,11 +70,162 @@ class PrioritizedReplayBuffer:
         # Assign max priority to new sample (num of proba)
         priority_alpha = self.priority_max**self.alpha
         # Update our trees
-
-        # self.priority_sum[idx] = priority_alpha
-        # self.priority_min[idx] = priority_alpha
+        self.priority_segment_tree_min(idx, priority_alpha)
+        self.priority_segment_tree_sum(idx, priority_alpha)
 
     def priority_segment_tree_min(self, idx, priority_alpha):
         """
-        Set the priority
+        Set the priority in the binary segment for the minimum
+
+        Arguments
+        ---------
+            idx: int
+                Index of the sample
+            priority_alpha: float
+                Priority of the sample
         """
+        idx += self.capacity
+        self.priority_min[idx] = priority_alpha
+
+        while idx >= 2:
+            idx //= 2
+            self.priority_min[idx] = min(
+                self.priority_min[2 * idx], self.priority_min[2 * idx + 1]
+            )
+
+    def priority_segment_tree_sum(self, idx, priority_alpha):
+        """
+        Set the priority in the binary segment for the minimum
+
+        Arguments
+        ---------
+            idx: int
+                Index of the sample
+            priority_alpha: float
+                Priority of the sample
+        """
+        idx += self.capacity
+        self.priority_sum[idx] = priority_alpha
+
+        while idx >= 2:
+            idx //= 2
+            self.priority_sum[idx] = (
+                self.priority_sum[2 * idx] + self.priority_sum[2 * idx + 1]
+            )
+
+    def sum_binary_tree(self):
+        """
+        Retrieve the sum of the priorities elevated to power alpha
+        """
+        # The root node possesses the sum of values
+        return self.priority_sum[1]
+
+    def min_binary_tree(self):
+        """
+        Retrieve the minimum of the priorities elevated to power alpha
+        """
+        # The root node possesses the min of values
+        return self.priority_min[1]
+
+    def binary_full(self):
+        """
+        Utility function to know if the tree is full
+        """
+        return self.capacity == self.size_buffer
+
+    def update_priorities(self, indexes, priorities):
+        """
+        Update the priorities of the sample
+
+        Arguments
+        ---------
+
+            indexes: list
+                list of indexes to update
+            priorities: list
+                list of the current priorities
+        """
+        for i, priority in zip(indexes, priorities):
+            # Update the max priority
+            self.priority_max = max(self.priority_max, priority)
+            # New priority value
+            priority_alpha = priority**self.alpha
+            # Update the trees
+            self.priority_segment_tree_min(i, priority_alpha)
+            self.priority_segment_tree_sum(i, priority_alpha)
+
+    def find_prefix_sum(self, prefix_sum):
+        """
+        Find the largest i such that the sum of the priorities is less than the proba P
+
+        Arguments
+        ---------
+            prefix_sum: int
+                Required Sum
+        Returns
+        -------
+            idx : int
+                index of the value (leaf node)
+        """
+        # Start from the root
+        idx = 1
+        while idx < self.capacity:
+            # If the sum of the left branch is higher than the required sum
+            if self.priority_sum[idx * 2] > prefix_sum:
+                # Left branch of the tree
+                idx = 2 * idx
+            # Else right branch, reduce the sum
+            else:
+                prefix_sum -= self.priority_sum[idx * 2]
+                idx = 2 * idx + 1
+        return idx - self.capacity
+
+    def sample(self, batch_size, beta):
+        """
+        Select a batch size of the best transitions
+
+        Arguments
+        ---------
+            batch_size: int
+                Size of the batch to train the agent on
+            beta: float
+                Regularization parameter
+
+        Returns
+        -------
+            samples: dict
+                Sample of the transitions
+        """
+        # Prepare the return object
+        samples = {
+            "weights": np.zeros(shape=batch_size, dtype=np.float32),
+            "indexes": np.zeros(shape=batch_size, dtype=np.int32),
+        }
+
+        for i in range(batch_size):
+            p = random.random() * self.sum_binary_tree()
+            idx = self.find_prefix_sum(p)
+            samples["indexes"][i] = idx
+
+        prob_min = self.min_binary_tree() / self.sum_binary_tree()
+        # Max Weight Formula
+        max_weight = (prob_min * self.size_buffer) ** (-beta)
+
+        for i in range(batch_size):
+            idx = samples["indexes"][i]
+            # Proba Formula
+            proba = self.priority_sum[idx + self.capacity] / self.sum_binary_tree()
+            # Weight formula
+            weight = (proba * self.size_buffer) ** (-beta)
+            # Normalisation
+            samples["weights"][i] = weight / max_weight
+
+        # Get samples data
+        for k, v in self.data.items():
+            samples[k] = v[samples["indexes"]]
+
+        return samples
+
+
+# Implementation from labml.ai
+# https://github.com/labmlai

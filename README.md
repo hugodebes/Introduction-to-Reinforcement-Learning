@@ -34,6 +34,9 @@ copyright = {arXiv.org perpetual, non-exclusive license} \
    3. Data Preprocessing
 5. Rainbow Experiments
 6. DQN-Rainbow Implementation
+   1. DQN Architecture
+   2. Rainbow Improvement
+   3. Results and Difficulties
 
 ## 2. Installation
 

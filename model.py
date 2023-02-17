@@ -9,7 +9,9 @@ class Network(nn.Module):
     Deep Q Neural Network
     """
 
-    def __init__(self, env, gamma, device, fg_double=True, fg_dueling=True):
+    def __init__(
+        self, env, gamma, device, fg_double=True, fg_dueling=True, fg_per=True
+    ):
         """
         Create the Convolutional Neural Network
 
@@ -25,6 +27,8 @@ class Network(nn.Module):
                 Double DQN Implementation
             fg_dueling: bool
                 Dueling Network Implementation
+            fg_per: bool
+                Prioritized Experience Replay Buffer
         """
         super().__init__()
         # DQN
@@ -34,6 +38,7 @@ class Network(nn.Module):
         # Rainbow Improvements
         self.fg_double = fg_double
         self.fg_dueling = fg_dueling
+        self.fg_per = fg_per
 
         n_input_channels = env.observation_space.shape[0]
         depths = (32, 64, 64)
@@ -135,7 +140,7 @@ class Network(nn.Module):
 
         return actions
 
-    def compute_loss(self, transitions, target_net):
+    def compute_loss(self, transitions, target_net, weights=None):
         """
         Compute the loss between the online network and the target network
 
@@ -145,51 +150,75 @@ class Network(nn.Module):
                 Transition between one step and another
             target_net: <Network>
                 Target Network
-
+            weights: np.array
+                Weights of the PER buffer
         Returns
         -------
             loss: float32
                 Loss of the model
 
         """
-        obses = [t[0] for t in transitions]
-        actions = np.asarray([t[1] for t in transitions])
-        rews = np.asarray([t[2] for t in transitions])
-        dones = np.asarray([t[3] for t in transitions])
-        new_obses = [t[4] for t in transitions]
+        if self.fg_per:
+            obses_t = torch.as_tensor(
+                transitions["obs"], dtype=torch.float32, device=self.device
+            )
+            actions_t = torch.as_tensor(
+                transitions["action"], dtype=torch.int64, device=self.device
+            ).unsqueeze(-1)
+            rews_t = torch.as_tensor(
+                transitions["reward"], dtype=torch.float32, device=self.device
+            ).unsqueeze(-1)
+            dones_t = torch.as_tensor(
+                transitions["done"], dtype=torch.float32, device=self.device
+            ).unsqueeze(-1)
+            new_obses_t = torch.as_tensor(
+                transitions["next_obs"], dtype=torch.float32, device=self.device
+            )
+        else:
+            obses = [t[0] for t in transitions]
+            actions = np.asarray([t[1] for t in transitions])
+            rews = np.asarray([t[2] for t in transitions])
+            dones = np.asarray([t[3] for t in transitions])
+            new_obses = [t[4] for t in transitions]
 
-        obses = np.stack([o._frames for o in obses])
-        new_obses = np.stack([o._frames for o in new_obses])
+            obses = np.stack([o._frames for o in obses])
+            new_obses = np.stack([o._frames for o in new_obses])
 
-        obses_t = torch.as_tensor(obses, dtype=torch.float32, device=self.device)
-        actions_t = torch.as_tensor(
-            actions, dtype=torch.int64, device=self.device
-        ).unsqueeze(-1)
-        rews_t = torch.as_tensor(
-            rews, dtype=torch.float32, device=self.device
-        ).unsqueeze(-1)
-        dones_t = torch.as_tensor(
-            dones, dtype=torch.float32, device=self.device
-        ).unsqueeze(-1)
-        new_obses_t = torch.as_tensor(
-            new_obses, dtype=torch.float32, device=self.device
-        )
+            obses_t = torch.as_tensor(obses, dtype=torch.float32, device=self.device)
+            actions_t = torch.as_tensor(
+                actions, dtype=torch.int64, device=self.device
+            ).unsqueeze(-1)
+            rews_t = torch.as_tensor(
+                rews, dtype=torch.float32, device=self.device
+            ).unsqueeze(-1)
+            dones_t = torch.as_tensor(
+                dones, dtype=torch.float32, device=self.device
+            ).unsqueeze(-1)
+            new_obses_t = torch.as_tensor(
+                new_obses, dtype=torch.float32, device=self.device
+            )
+
+        # Compute Loss
+        q_values = self(obses_t)
+        action_q_values = torch.gather(input=q_values, dim=1, index=actions_t)
 
         with torch.no_grad():
             # Double DQN Implementation
             if self.fg_double:
                 # Target using the online net
-                o_targets_online_q = self(new_obses_t)
+                o_targets_q = self(new_obses_t)
                 # Best one
-                o_target_online_max_q = o_targets_online_q.argmax(dim=1, keepdim=True)
+                o_target_max_q = o_targets_q.argmax(dim=1, keepdim=True)
 
                 # Target using the target net
-                t_targets_online_q = self(new_obses_t)
+                t_targets_q = self(new_obses_t)
                 # Select from the q values of the target based on the indices action selected by the online net
                 t_target_online_max_q = torch.gather(
-                    input=t_targets_online_q, dim=1, index=o_target_online_max_q
+                    input=t_targets_q, dim=1, index=o_target_max_q
                 )
                 targets = rews_t + self.gamma * (1 - dones_t) * t_target_online_max_q
+            if self.fg_per:
+                td_error = action_q_values - targets
             else:
                 # Compute Targets
                 # targets = r + gamma * target q vals * (1 - dones)
@@ -198,10 +227,6 @@ class Network(nn.Module):
 
                 targets = rews_t + self.gamma * (1 - dones_t) * max_target_q_values
 
-        # Compute Loss
-        q_values = self(obses_t)
-        action_q_values = torch.gather(input=q_values, dim=1, index=actions_t)
-
-        loss = nn.functional.smooth_l1_loss(action_q_values, targets)
-
-        return loss
+        losses = nn.functional.smooth_l1_loss(action_q_values, targets)
+        loss = torch.mean(weights * losses)
+        return td_error, loss
