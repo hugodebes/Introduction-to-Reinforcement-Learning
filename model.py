@@ -217,8 +217,6 @@ class Network(nn.Module):
                     input=t_targets_q, dim=1, index=o_target_max_q
                 )
                 targets = rews_t + self.gamma * (1 - dones_t) * t_target_online_max_q
-            if self.fg_per:
-                td_error = action_q_values - targets
             else:
                 # Compute Targets
                 # targets = r + gamma * target q vals * (1 - dones)
@@ -226,6 +224,8 @@ class Network(nn.Module):
                 max_target_q_values = target_q_values.max(dim=1, keepdim=True)[0]
 
                 targets = rews_t + self.gamma * (1 - dones_t) * max_target_q_values
+            if self.fg_per:
+                td_error = action_q_values - targets
 
         losses = nn.functional.smooth_l1_loss(action_q_values, targets)
         loss = torch.mean(weights * losses)

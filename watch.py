@@ -20,7 +20,9 @@ def watch():
     print("device:", device)
 
     env = make_env(ENV_ID, fg_watch=fg_watch)
-    net = Network(env, GAMMA, device).to(device)
+    net = Network(
+        env, GAMMA, device, fg_double=False, fg_dueling=False, fg_per=False
+    ).to(device)
 
     prev_state = load_state(LOAD_PATH)
     net.load_state_dict(prev_state["state_dict"])

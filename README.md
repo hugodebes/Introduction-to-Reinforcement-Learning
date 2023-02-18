@@ -36,7 +36,7 @@ copyright = {arXiv.org perpetual, non-exclusive license} \
 6. DQN-Rainbow Implementation
    1. DQN Architecture
    2. Rainbow Improvement
-   3. Results and Difficulties
+   3. Results
 
 ## 2. Installation
 

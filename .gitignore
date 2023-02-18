@@ -161,4 +161,4 @@ cython_debug/
 
 
 #data
-logs/atari_vanilla
+logs/
